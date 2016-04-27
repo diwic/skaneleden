@@ -1,0 +1,18 @@
+cd data
+cd overview
+wget http://www.skaneleden.se/leden/sl-5-oresundsleden/
+wget http://www.skaneleden.se/leden/sl-4-osterlenleden/
+wget http://www.skaneleden.se/leden/sl-3-as-asleden/
+wget http://www.skaneleden.se/leden/sl-2-nord-sydleden/
+wget http://www.skaneleden.se/leden/sl-1-kust-kustleden/
+		
+grep -rho 'http://www.skaneleden.se/leden/sl-[^\\""]*' | sort | uniq > alla_etapper.txt
+cd ..
+cd etapper
+wget -i ../overview/alla_etapper.txt 
+
+grep -roh '/media/[^\\""]*.gpx' | sort | uniq | sed 's#^#http://www.skaneleden.se#' - > alla_gpx.txt
+cd ..
+cd all_gpx
+wget -i ../alla_etapper/alla_gpx.txt
+
