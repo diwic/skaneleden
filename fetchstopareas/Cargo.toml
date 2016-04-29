@@ -1,8 +1,9 @@
 [package]
-name = "fetchkoords"
+name = "fetchstopareas"
 version = "0.1.0"
 authors = ["David Henningsson <diwic@ubuntu.com>"]
 
 [dependencies]
-xml-rs = "0.3"
 rustc-serialize = "0.3"
+xml-rs = "0.2"
+hyper = "0.9"

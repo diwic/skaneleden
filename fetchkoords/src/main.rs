@@ -1,5 +1,5 @@
 extern crate xml;
-// extern crate encoding;
+extern crate rustc_serialize;
 
 fn wgs84_to_rt90(lat_deg: f64, lon_deg: f64) -> (f64, f64) {
     // References:
@@ -50,46 +50,61 @@ fn wgs84_to_rt90(lat_deg: f64, lon_deg: f64) -> (f64, f64) {
 fn dist(a: (f64, f64), b: (f64, f64)) -> f64 { ((a.0 - b.0) * (a.0 - b.0) + (a.1 - b.1) * (a.1 - b.1)).sqrt() }
 
 
-fn process_file(fname: &std::path::Path) -> Result<(), Box<std::error::Error>> {
-    use std::io::{Read, Write};
+fn process_file(fname: &std::path::Path) -> Result<(String, Vec<(f64, f64)>), Box<std::error::Error>> {
+    use std::io::Read;
     println!("Processing {}", fname.to_str().unwrap());
     let mut f = try!(std::fs::File::open(fname));
     let mut s = vec!();
     try!(f.read_to_end(&mut s));
     let ss = try!(std::str::from_utf8(if &s[..3] == &[0xef, 0xbb, 0xbf][..] { &s[3..] } else { &s }));
     let r = xml::EventReader::from_str(ss);
+    let mut last_char = None;
+    let mut trackname = None;
     let mut points = vec!();
     for event in r {
+        use xml::reader::XmlEvent::*;
         let e = try!(event);
-        if let xml::reader::XmlEvent::StartElement { name: nn, attributes: attr, namespace: _ } = e {
-            if nn.local_name != "trkpt" { continue };
-            let (mut lat, mut lon): (Option<f64>, Option<f64>) = (None, None);
-            for a in attr {
-                if a.name.local_name == "lat" { lat = Some(try!(a.value.parse())); }
-                if a.name.local_name == "lon" { lon = Some(try!(a.value.parse())); }
-            }
-            if lat.is_some() && lon.is_some() { points.push((lat.unwrap(), lon.unwrap())); }
+        // println!("{:?}", e);
+        match e {
+            StartElement { name: nn, attributes: attr, namespace: _ } => {
+                if nn.local_name != "trkpt" { continue };
+                let (mut lat, mut lon): (Option<f64>, Option<f64>) = (None, None);
+                for a in attr {
+                    if a.name.local_name == "lat" { lat = Some(try!(a.value.parse())); }
+                    if a.name.local_name == "lon" { lon = Some(try!(a.value.parse())); }
+                }
+                if lat.is_some() && lon.is_some() { points.push((lat.unwrap(), lon.unwrap())); }
+            },
+            EndElement { name: nn } => {
+                if nn.local_name == "name" { trackname = last_char.take(); }
+            },
+            Characters (s) => { last_char = Some(s); },
+            _ => {},
         }
     }
-    println!("{} points found", points.len());
+    println!("{} points found on track {}", points.len(), trackname.as_ref().unwrap());
     let rt90: Vec<_> = points.iter().map(|&(lat, lon)| wgs84_to_rt90(lat, lon)).collect();
     let mut totaldist = 0f64;
     for i in 1..rt90.len() { totaldist += dist(rt90[i], rt90[i-1]) };
     println!("Total distance: {}", totaldist);
 
     //println!("all: {:?}", rt90);
-    let destfname = std::path::PathBuf::from("./data/rt90").join(fname.with_extension("rt90").file_name().unwrap());
+/*    let destfname = std::path::PathBuf::from("./data/rt90").join(fname.with_extension("rt90").file_name().unwrap());
     println!("Writing to {}", destfname.to_str().unwrap());
     let mut f = try!(std::fs::File::create(&destfname));
     for (x, y) in rt90 {
         try!(write!(f, "{} {}\n", x, y));
-    }
-    Ok(())
+    } */
+    Ok((trackname.unwrap(), rt90))
 }
 
 fn main() {
+    use std::io::Write;
     println!("{:?}", std::env::current_dir());
+    let mut b = std::collections::BTreeMap::new();
     for f in std::fs::read_dir("./data/all_gpx").unwrap() {
-        let _ = f.map(|f| process_file(&f.path()).map_err(|e| println!("{:?}", e))).map_err(|e| println!("{:?}", e));
+        let _ = f.map(|f| process_file(&f.path()).map(|(s, v)| b.insert(s, v))
+            .map_err(|e| println!("{:?}", e))).map_err(|e| println!("{:?}", e));
     }
+    write!(std::fs::File::create("./data/etapper.json").unwrap(), "{}", rustc_serialize::json::encode(&b).unwrap()).unwrap();
 }
