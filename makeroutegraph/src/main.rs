@@ -13,7 +13,7 @@ struct StopArea {
     y: i32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Node {
     pos: (f64, f64),
     stoparea: Option<i32>,
@@ -91,6 +91,7 @@ fn make_svg(graph: &Graph<Node, f64>) {
 
 fn do_stop_area_work(graph: &mut Graph<Node, f64>, stopareas: HashMap<i32, StopArea>) {
     let area_to_ni: HashMap<i32, NodeIndex> = stopareas.values()
+        .filter(|v| v.name.find(" NO ").is_none()) // Ta bort närområdestrafik
         .map(|v| (v.id, add_node2(graph, (v.x as f64, v.y as f64), v.id))).collect();
     println!("Added {} stop areas", area_to_ni.len());
 
@@ -116,12 +117,10 @@ fn do_stop_area_work(graph: &mut Graph<Node, f64>, stopareas: HashMap<i32, StopA
         println!("Connecting {} with {} ({} m)", stopareas[&graph[sa_ni].stoparea.unwrap()].name, graph[ni].etapp_name(), d as i32);
     }
 
-    // Remove unconnected stop areas
-    graph.retain_nodes(|g, ni| g.neighbors_undirected(ni).count() >= 1);
 }
 
 fn main() {
-    use std::io::Read;
+    use std::io::{Read, Write};
     let mut f = std::fs::File::open("../fetchkoords/data/etapper.json").unwrap();
     let mut s = String::new();
     f.read_to_string(&mut s).unwrap();
@@ -166,8 +165,57 @@ fn main() {
     let mut s = String::new();
     f.read_to_string(&mut s).unwrap();
     let stopareas: HashMap<i32, StopArea> = rustc_serialize::json::decode(&s).unwrap();
+    let sa2 = stopareas.clone();
     do_stop_area_work(&mut graph, stopareas);
 
+    // Reduce to a simpler graph
+    for ni in graph.node_indices() {
+        if graph[ni].etapp.is_none() { continue; }
+        let z: Vec<_> = graph.neighbors_undirected(ni).collect();
+        if z.len() != 2 { continue; }
+        if graph[z[0]].etapp.is_none() || graph[z[1]].etapp.is_none() { continue; }
+        if graph[z[0]].etapp_name() != graph[ni].etapp_name() { continue; }
+        if graph[z[1]].etapp_name() != graph[ni].etapp_name() { continue; }
+        
+        let (a, _) = graph.find_edge_undirected(ni, z[0]).unwrap();
+        let (b, _) = graph.find_edge_undirected(ni, z[1]).unwrap();
+        let d = graph[a] + graph[b];
+        graph.add_edge(z[0], z[1], d);
+        graph.remove_edge(a);
+        let (b, _) = graph.find_edge_undirected(ni, z[1]).unwrap();
+        graph.remove_edge(b);
+    }
+
+    // Remove unconnected stop areas
+    graph.retain_nodes(|g, ni| g.neighbors_undirected(ni).count() >= 1);
+    println!("{} nodes left after simplifying graph", graph.node_indices().count());
     make_svg(&graph);
-   
+
+    // Time to go dijkstra!
+    let g2: Graph<_, _, petgraph::Undirected> = graph.clone().into_edge_type();
+    let mut paths = vec!();
+    for ni in graph.node_indices().filter(|&ni| graph[ni].stoparea.is_some()) {
+        let srcn = &graph[ni];
+        println!("Searching from {}", sa2[&srcn.stoparea.unwrap()].name);
+       	let imap = petgraph::algo::dijkstra(&graph, ni, None,
+            |_, nn| g2.edges(nn).map(|(a, &b)| { /* println!("{:?} {}", graph[a], b); */ (a, b) }));
+        for (nn, v) in imap {
+            if ni == nn { continue; }
+            if v > 40000f64 || v < 1000f64 { continue; } // Skip things outside 1 km - 40 km range, for now.
+            let destn = &graph[nn];
+            if destn.stoparea.is_none() { continue; }
+            let vw = *g2.edges(ni).next().unwrap().1 + *g2.edges(nn).next().unwrap().1; 
+            if vw*2f64 > v { continue; } // If walking on the trail is less distance than walking to and from it...
+            let sid = srcn.stoparea.unwrap();
+            let did = destn.stoparea.unwrap(); 
+            println!("{} m ({} m) between {} and {}", v as i32, vw as i32,
+                sa2[&sid].name, sa2[&did].name);
+            paths.push(vec!(v as i32, sid, did));
+        }
+    }
+    println!("Writing {} suggested paths!", paths.len());
+
+    write!(std::fs::File::create("../fetchkoords/data/all_paths.json").unwrap(), "{}",
+        rustc_serialize::json::encode(&paths).unwrap()).unwrap();
+
 }
