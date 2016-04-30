@@ -6,3 +6,4 @@ authors = ["David Henningsson <diwic@ubuntu.com>"]
 [dependencies]
 xml-rs = "0.3"
 rustc-serialize = "0.3"
+regex = "0.1"

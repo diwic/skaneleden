@@ -1,7 +1,8 @@
 extern crate rustc_serialize;
 extern crate petgraph;
+extern crate utils;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use petgraph::Graph;
 use petgraph::graph::NodeIndex;
 
@@ -119,6 +120,33 @@ fn do_stop_area_work(graph: &mut Graph<Node, f64>, stopareas: HashMap<i32, StopA
 
 }
 
+#[derive(Debug, Clone, Default)]
+struct TrEdge(f64, HashSet<String>);
+
+impl TrEdge {
+    fn new(n: &Node, d: f64) -> TrEdge {
+        let mut s = HashSet::new();
+        n.etapp.as_ref().map(|e| s.insert(e.0.clone()));
+        TrEdge(d, s) }
+}
+
+impl std::ops::Add for TrEdge {
+    type Output = TrEdge;
+    fn add(mut self, rhs: TrEdge) -> TrEdge {
+        self.1.extend(rhs.1.into_iter());
+        TrEdge(self.0 + rhs.0, self.1)
+    }
+}
+
+impl std::cmp::PartialOrd for TrEdge {
+    fn partial_cmp(&self, rhs: &TrEdge) -> Option<std::cmp::Ordering> { self.0.partial_cmp(&rhs.0) }
+}
+
+impl std::cmp::PartialEq for TrEdge {
+    fn eq(&self, rhs: &TrEdge) -> bool { self.0.eq(&rhs.0) }
+    fn ne(&self, rhs: &TrEdge) -> bool { self.0.ne(&rhs.0) }
+}
+
 fn main() {
     use std::io::{Read, Write};
     let mut f = std::fs::File::open("../fetchkoords/data/etapper.json").unwrap();
@@ -136,7 +164,9 @@ fn main() {
             prevn.map(|pn| {
                 let dd = dist({ let dummy: &Node = &graph[pn]; dummy.pos }, p);
                 d += dd;
-                graph.add_edge(pn, newn, dd);
+                if dd < 1000f64 {
+                    graph.add_edge(pn, newn, dd);
+                }
             });
             prevn = Some(newn);
         }
@@ -194,28 +224,43 @@ fn main() {
     // Time to go dijkstra!
     let g2: Graph<_, _, petgraph::Undirected> = graph.clone().into_edge_type();
     let mut paths = vec!();
+    let mut paths2 = HashMap::new();
     for ni in graph.node_indices().filter(|&ni| graph[ni].stoparea.is_some()) {
         let srcn = &graph[ni];
         println!("Searching from {}", sa2[&srcn.stoparea.unwrap()].name);
        	let imap = petgraph::algo::dijkstra(&graph, ni, None,
-            |_, nn| g2.edges(nn).map(|(a, &b)| { /* println!("{:?} {}", graph[a], b); */ (a, b) }));
+            |_, nn| g2.edges(nn).map(|(a, &b)| (a, TrEdge::new(&g2[a], b))));
         for (nn, v) in imap {
             if ni == nn { continue; }
-            if v > 40000f64 || v < 1000f64 { continue; } // Skip things outside 1 km - 40 km range, for now.
+            if v.0 > 40000f64 || v.0 < 1000f64 { continue; } // Skip things outside 1 km - 40 km range, for now.
             let destn = &graph[nn];
             if destn.stoparea.is_none() { continue; }
-            let vw = *g2.edges(ni).next().unwrap().1 + *g2.edges(nn).next().unwrap().1; 
-            if vw*2f64 > v { continue; } // If walking on the trail is less distance than walking to and from it...
-            let sid = srcn.stoparea.unwrap();
-            let did = destn.stoparea.unwrap(); 
-            println!("{} m ({} m) between {} and {}", v as i32, vw as i32,
-                sa2[&sid].name, sa2[&did].name);
-            paths.push(vec!(v as i32, sid, did));
+            let mut sdist = *g2.edges(ni).next().unwrap().1;
+            let mut ddist = *g2.edges(nn).next().unwrap().1;
+            let vw = sdist + ddist;
+            if vw*2f64 > v.0 { continue; } // If walking on the trail is less distance than walking to and from it...
+            let mut sid = srcn.stoparea.unwrap();
+            let mut did = destn.stoparea.unwrap();
+
+            if did < sid {
+                std::mem::swap(&mut sid, &mut did);
+                std::mem::swap(&mut sdist, &mut ddist);
+            }
+            println!("{} m ({} m) between {} and {}, visiting {:?}", v.0 as i32, vw as i32,
+                sa2[&sid].name, sa2[&did].name, v.1);
+            paths.push(vec!(v.0 as i32, sid, did));
+            paths2.insert((sid, did), utils::Path {
+                dist: v.0 as i32, src: sid, dest: did, srcdist: sdist as i32, destdist: ddist as i32,
+                etapp: v.1.iter().fold("".into(), |a, b| format!("{};{}", a, b)) });
         }
     }
     println!("Writing {} suggested paths!", paths.len());
 
     write!(std::fs::File::create("../fetchkoords/data/all_paths.json").unwrap(), "{}",
         rustc_serialize::json::encode(&paths).unwrap()).unwrap();
+
+    let v: Vec<_> = paths2.values().collect();
+    write!(std::fs::File::create("../data/paths.json").unwrap(), "{}",
+        rustc_serialize::json::encode(&v).unwrap()).unwrap();
 
 }

@@ -1,5 +1,6 @@
 extern crate xml;
 extern crate rustc_serialize;
+extern crate regex;
 
 fn wgs84_to_rt90(lat_deg: f64, lon_deg: f64) -> (f64, f64) {
     // References:
@@ -49,6 +50,30 @@ fn wgs84_to_rt90(lat_deg: f64, lon_deg: f64) -> (f64, f64) {
 
 fn dist(a: (f64, f64), b: (f64, f64)) -> f64 { ((a.0 - b.0) * (a.0 - b.0) + (a.1 - b.1) * (a.1 - b.1)).sqrt() }
 
+fn fixup_name(s: &str) -> String {
+    use regex::Regex;
+    if let Some(c) = Regex::new(r"^SL(\d+)[_-](\d+)(A?)").unwrap().captures(s) {
+        format!("{}_{}{}", c.at(1).unwrap(), c.at(2).unwrap(), c.at(3).unwrap())
+    }
+    else if let Some(c) = Regex::new(r"^sl(\d+)[_-](\d+)(a?)").unwrap().captures(s) {
+        format!("{}_{}{}", c.at(1).unwrap(), c.at(2).unwrap(), c.at(3).unwrap().to_uppercase())
+    }
+    else if let Some(c) = Regex::new(r"^KKetapp(\d+)(A?)").unwrap().captures(s) {
+        format!("1_{}{}", c.at(1).unwrap(), c.at(2).unwrap())
+    }
+    else if let Some(c) = Regex::new(r"^NSetapp(\d+)(A?)").unwrap().captures(s) {
+        format!("2_{}{}", c.at(1).unwrap(), c.at(2).unwrap())
+    }
+    else if let Some(c) = Regex::new(r"^ÅSetapp(\d+)(A?)").unwrap().captures(s) {
+        format!("3_{}{}", c.at(1).unwrap(), c.at(2).unwrap())
+    }
+    else if let Some(c) = Regex::new(r"^ÖSTetapp(\d+)(B?)").unwrap().captures(s) {
+        format!("4_{}{}", c.at(1).unwrap(), c.at(2).unwrap())
+    }
+    else if s == "?Setapp3" { "3_3".into() }
+    else if s == "Ljungens camping - Falsterbokanalen" { "5_21".into() }
+    else { panic!("!!! {}", s); }
+}
 
 fn process_file(fname: &std::path::Path) -> Result<(String, Vec<(f64, f64)>), Box<std::error::Error>> {
     use std::io::Read;
@@ -78,11 +103,13 @@ fn process_file(fname: &std::path::Path) -> Result<(String, Vec<(f64, f64)>), Bo
             EndElement { name: nn } => {
                 if nn.local_name == "name" { trackname = last_char.take(); }
             },
-            Characters (s) => { last_char = Some(s); },
+            Characters (s) => { if s.parse::<i32>().is_err() { last_char = Some(s); }},
             _ => {},
         }
     }
-    println!("{} points found on track {}", points.len(), trackname.as_ref().unwrap());
+    let trackname = trackname.unwrap_or_else(|| fname.file_stem().unwrap().to_str().unwrap().into());
+
+    println!("{} points found on track {}", points.len(), trackname);
     let rt90: Vec<_> = points.iter().map(|&(lat, lon)| wgs84_to_rt90(lat, lon)).collect();
     let mut totaldist = 0f64;
     for i in 1..rt90.len() { totaldist += dist(rt90[i], rt90[i-1]) };
@@ -95,7 +122,7 @@ fn process_file(fname: &std::path::Path) -> Result<(String, Vec<(f64, f64)>), Bo
     for (x, y) in rt90 {
         try!(write!(f, "{} {}\n", x, y));
     } */
-    Ok((trackname.unwrap(), rt90))
+    Ok((trackname, rt90))
 }
 
 fn main() {
@@ -103,7 +130,7 @@ fn main() {
     println!("{:?}", std::env::current_dir());
     let mut b = std::collections::BTreeMap::new();
     for f in std::fs::read_dir("./data/all_gpx").unwrap() {
-        let _ = f.map(|f| process_file(&f.path()).map(|(s, v)| b.insert(s, v))
+        let _ = f.map(|f| process_file(&f.path()).map(|(s, v)| b.insert(fixup_name(&s), v))
             .map_err(|e| println!("{:?}", e))).map_err(|e| println!("{:?}", e));
     }
     write!(std::fs::File::create("./data/etapper.json").unwrap(), "{}", rustc_serialize::json::encode(&b).unwrap()).unwrap();

@@ -1,9 +1,8 @@
 [package]
-name = "makeroutegraph"
+name = "searchpath"
 version = "0.1.0"
 authors = ["David Henningsson <diwic@ubuntu.com>"]
 
 [dependencies]
 rustc-serialize = "0.3"
-petgraph = { path = "../../petgraph" }
 utils = { path = "../utils" }
