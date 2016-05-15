@@ -194,23 +194,35 @@ fn do_search(p: &SearchParams, paths: &Vec<utils::Path>, stopareas: &HashMap<i32
 
     // Search for origin journeys 
     let sa_origin_tocheck: HashSet<i32> = paths2.iter().map(|v| v.src).collect();
-    let origin_journeys: HashMap<_,_> = sa_origin_tocheck.iter().map(|&id|
-        (id, ask_journeys(&p.origin_sa, &stopareas[&id], p.origin_time))).collect();
+    let sa_origin_threads: Vec<(i32, _)> = sa_origin_tocheck.iter().map(|&id| {
+        let sa1 = p.origin_sa.clone();
+        let sa2 = stopareas[&id].clone();
+        let time = p.origin_time;
+        (id, std::thread::spawn(move || { ask_journeys(&sa1, &sa2, time) }))
+    }).collect();
+    let origin_journeys: HashMap<i32, Vec<Journey>> = sa_origin_threads.into_iter().map(|(id, th)|
+        (id, th.join().unwrap())).collect();
     let origin_scores: HashMap<i32, (i32, Journey)> = 
         origin_journeys.iter().filter_map(
             |(&id, js)| Journey::best(js, p.origin_time).map(|(score, j)| (id, (score, j.clone())))
         ).collect();
 
     // Search for destination journeys
-    let mut full_paths: Vec<FullPath> = vec!();
-    for v in paths2.iter() {
-        let &(origs, ref origj) = if let Some(j) = origin_scores.get(&v.src) { j } else { continue };
-        let destdeptime = origj.arrtime + chrono::Duration::seconds((v.dist as i64) * 3600i64 / (p.walk_speed as i64));
-        let destjs = ask_journeys(&stopareas[&v.dest], &p.dest_sa, destdeptime);
-        let (dests, destj) = if let Some(j) = Journey::best(&destjs, destdeptime) { j } else { continue };
+    let sa_dest_threads: Vec<(utils::Path, Journey, i32, _, _)> = paths2.iter()
+        .filter_map(|v| origin_scores.get(&v.src).map(|&(os, ref oj)| (v, os, oj.clone())))
+        .map(|(v, os, oj)| {
+            let sa1 = stopareas[&v.dest].clone();
+            let sa2 = p.dest_sa.clone();
+            let time = oj.arrtime + chrono::Duration::seconds((v.dist as i64) * 3600i64 / (p.walk_speed as i64));
+            let th = std::thread::spawn(move || { ask_journeys(&sa1, &sa2, time) });
+            (v.clone(), oj, os, time, th)
+        }).collect();
+    let mut full_paths: Vec<FullPath> = sa_dest_threads.into_iter().filter_map(|(v, origj, origs, destdeptime, th)| {
+        let destjs = th.join().unwrap();
+        let (dests, destj) = if let Some(j) = Journey::best(&destjs, destdeptime) { j } else { return None };
         let totalscore = origs + dests - v.srcdist - v.destdist;
-        full_paths.push(FullPath { origj: origj.clone(), destj: destj.clone(), path: v.clone(), score: totalscore });
-    }
+        Some(FullPath { origj: origj, destj: destj.clone(), path: v, score: totalscore })  
+    }).collect();
 
     // Present result
     full_paths.sort_by(|v1, v2| v2.score.cmp(&v1.score));
