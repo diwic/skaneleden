@@ -18,11 +18,13 @@ struct StopArea {
 
 struct SearchParams {
     min_distance: i32,
-    opt_distance: i32,
     max_distance: i32,
+
+    walk_speed: i32, // meters per hour
 
     origin_sa: StopArea,
     origin_time: TimeStamp,
+    dest_sa: StopArea,
 }
 
 
@@ -45,7 +47,7 @@ fn ask_stop_area(n: &str) -> Option<StopArea> {
                 "Name" => { sa.name = last_chars.take().unwrap() }
                 "X" => { sa.x = last_chars.take().unwrap().parse().unwrap() }
                 "Y" => { sa.y = last_chars.take().unwrap().parse().unwrap() }
-                "Point" => { return Some(sa) } 
+                "Point" => { return Some(sa) }
                 _ => {},
             },
             _ => { last_chars = None; }
@@ -65,12 +67,27 @@ struct Journey {
 const MAX_JOURNEY_TIME_SCORE: i32 = 6 * 60 * 60; // 6 hours
 
 impl Journey {
-    fn score(&self, p: &SearchParams) -> Option<i32> {
-        if self.deptime < p.origin_time { return None };
+    fn score(&self, after: TimeStamp) -> Option<i32> {
+        if self.deptime < after { return None };
         let traveltime = self.arrtime.timestamp() - self.deptime.timestamp();
-        let waittime = (self.deptime.timestamp() - p.origin_time.timestamp()).abs();
+        let waittime = self.deptime.timestamp() - after.timestamp();
         let s = MAX_JOURNEY_TIME_SCORE - ((traveltime * 2 + waittime) as i32);
         if s > 0 { Some(s) } else { None }
+    }
+
+    fn best(js: &[Journey], after: TimeStamp) -> Option<(i32, &Journey)> {
+        let mut bscore = 0;
+        let mut bj = None;
+        for j in js.iter() {
+            j.score(after).map(|s| { if s > bscore { bj = Some(j); bscore = s; }});
+        }
+        bj.map(|bj| (bscore, bj))
+    }
+
+    fn duration_as_string(&self) -> String {
+        let d = self.arrtime - self.deptime;
+        if d.num_hours() > 0 { format!("{} h {} min", d.num_hours(), d.num_minutes() % 60) }
+        else { format!("{} min", d.num_minutes()) } 
     }
 }
 
@@ -82,7 +99,7 @@ fn ask_journeys(from: &StopArea, to: &StopArea, deptime: TimeStamp) -> Vec<Journ
         .append_pair("cmdAction", "search")
         .append_pair("selPointFr", &format!("{}|{}|0", from.name, from.id))
         .append_pair("selPointTo", &format!("{}|{}|0", to.name, to.id));
-    println!("Checking connections from {} to {}...", from.name, to.name);
+    println!("Checking connections from {} to {} at {}...", from.name, to.name, deptime);
     let res = hyper::Client::new().get(url).send();
     let res = if let Ok(res) = res { res } else { println!("Open API broken: {:?}", res); return vec!() };
     if res.status != hyper::status::StatusCode::Ok { println!("Open API broken: {:?}", res); return vec!() }
@@ -126,9 +143,7 @@ fn ask_journeys(from: &StopArea, to: &StopArea, deptime: TimeStamp) -> Vec<Journ
         }
     }
 
-    println!("{} connections found", journeys.len());// iter().filter(|j| j.score().is_some()).count());
-
-    //if journeys.len() > 0 { panic!("{:?}", journeys); }
+    println!("{} connections found", journeys.iter().filter(|j| j.score(deptime).is_some()).count());
     journeys
 }
 
@@ -155,47 +170,72 @@ fn fix_etapp(s: &str) -> String {
     r
 }
 
+fn to_km(i: i32) -> f64 { (i as f64)/1000f64 }
+
+struct FullPath {
+    origj: Journey,
+    destj: Journey,
+    path: utils::Path,
+    score: i32,
+}
+
 fn do_search(p: &SearchParams, paths: &Vec<utils::Path>, stopareas: &HashMap<i32, StopArea>) {
-    let paths2: Vec<_> = paths.iter().filter(|v| v.dist >= p.min_distance && v.dist <= p.max_distance).collect();
-    let mut sas_tocheck = HashSet::new();
-    for i in &paths2 { sas_tocheck.insert(i.src); sas_tocheck.insert(i.dest); } 
-    let sa_journeys: HashMap<_,_> = sas_tocheck.iter().map(|&id|
-        (id, ask_journeys(&p.origin_sa, &stopareas[&id], p.origin_time))).collect();
-    
-    let mut sa_origin_scores: HashMap<i32, (i32, Journey)> = HashMap::new();
-    for (&id, js) in sa_journeys.iter() {
-        let mut bscore = 0;
-        let mut bj = None;
-        for j in js.iter() {
-            j.score(p).map(|s| { if s > bscore { bj = Some(j); bscore = s; }});
-        }
-        bj.map(|bj| { sa_origin_scores.insert(id, (bscore, bj.clone())) });
+
+    // Add paths for both directions.
+    let mut paths2 = vec!();
+    for v in paths.iter() {
+        if v.dist < p.min_distance { continue };
+        if v.dist > p.max_distance { continue };
+        paths2.push(v.clone());
+        let mut vv = v.clone();
+        vv.reverse();
+        paths2.push(vv);
     }
 
-    let mut sa_skip = HashMap::new();
+    // Search for origin journeys 
+    let sa_origin_tocheck: HashSet<i32> = paths2.iter().map(|v| v.src).collect();
+    let origin_journeys: HashMap<_,_> = sa_origin_tocheck.iter().map(|&id|
+        (id, ask_journeys(&p.origin_sa, &stopareas[&id], p.origin_time))).collect();
+    let origin_scores: HashMap<i32, (i32, Journey)> = 
+        origin_journeys.iter().filter_map(
+            |(&id, js)| Journey::best(js, p.origin_time).map(|(score, j)| (id, (score, j.clone())))
+        ).collect();
 
-    let mut paths3: Vec<_> = paths2.iter().filter(|v|
-        sa_origin_scores.get(&v.src).and_then(|_| sa_origin_scores.get(&v.dest)).is_some()).collect();
-    paths3.sort_by(|v2, v1| std::cmp::max(sa_origin_scores[&v1.src].0, sa_origin_scores[&v1.dest].0)
-        .cmp(&std::cmp::min(sa_origin_scores[&v2.src].0, sa_origin_scores[&v2.dest].0)));
-   // paths2.sort_by(|v1, v2| (v1.dist - p.opt_distance).abs().cmp(&(v2.dist - p.opt_distance).abs()));
-    for i in paths3 {
-        if sa_skip.contains_key(&i.src) || sa_skip.contains_key(&i.dest) { continue; }
+    // Search for destination journeys
+    let mut full_paths: Vec<FullPath> = vec!();
+    for v in paths2.iter() {
+        let &(origs, ref origj) = if let Some(j) = origin_scores.get(&v.src) { j } else { continue };
+        let destdeptime = origj.arrtime + chrono::Duration::seconds((v.dist as i64) * 3600i64 / (p.walk_speed as i64));
+        let destjs = ask_journeys(&stopareas[&v.dest], &p.dest_sa, destdeptime);
+        let (dests, destj) = if let Some(j) = Journey::best(&destjs, destdeptime) { j } else { continue };
+        let totalscore = origs + dests - v.srcdist - v.destdist;
+        full_paths.push(FullPath { origj: origj.clone(), destj: destj.clone(), path: v.clone(), score: totalscore });
+    }
 
-        let orig_j = &sa_origin_scores[&i.src].1;
-        let orig_jtime = orig_j.arrtime - orig_j.deptime;
- 
+    // Present result
+    full_paths.sort_by(|v1, v2| v2.score.cmp(&v1.score));
+    let mut sa_skip = HashSet::new();
+    for i in full_paths {
+        if sa_skip.contains(&i.path.src) || sa_skip.contains(&i.path.dest) { continue; }
+
+        let src_name = &stopareas[&i.path.src].name;
+        let dest_name = &stopareas[&i.path.dest].name;
+
         println!("");
-        println!("Från {} till {}: minst {:.1} km", stopareas[&i.src].name, stopareas[&i.dest].name, (i.dist as f64)/1000f64);
-        println!("  Res {}{} min, från {} kl {} till {} kl {}, {} {}",
-            if orig_jtime.num_hours() > 0 {format!("{} h ", orig_jtime.num_hours())} else {"".into()}, orig_jtime.num_minutes() % 60, 
-            p.origin_sa.name, orig_j.deptime, stopareas[&i.src].name, orig_j.arrtime,
-            orig_j.changes, if orig_j.changes == 1 {"byte"} else {"byten"});
-        println!("  Gå minst {:.1} km, från {} till Skåneleden", (i.srcdist as f64)/1000f64, stopareas[&i.src].name);
-        println!("  Gå {:.1} km, på {}", ((i.dist - i.srcdist - i.destdist) as f64)/1000f64, fix_etapp(&i.etapp));
-        println!("  Gå minst {:.1} km, från Skåneleden till {}", (i.destdist as f64)/1000f64, stopareas[&i.dest].name);
-        sa_skip.insert(i.src, ());
-        sa_skip.insert(i.dest, ());
+        println!("Från {} till {}: minst {:.1} km", src_name, dest_name, to_km(i.path.dist));
+        println!("  Res {}, från {} kl {} till {} kl {}, {} {}",
+            i.origj.duration_as_string(),
+            p.origin_sa.name, i.origj.deptime, src_name, i.origj.arrtime,
+            i.origj.changes, if i.origj.changes == 1 {"byte"} else {"byten"});
+        println!("  Gå minst {:.1} km, från {} till Skåneleden", to_km(i.path.srcdist), src_name);
+        println!("  Gå {:.1} km, på {}", to_km(i.path.dist - i.path.srcdist - i.path.destdist), fix_etapp(&i.path.etapp));
+        println!("  Gå minst {:.1} km, från Skåneleden till {}", to_km(i.path.destdist), dest_name);
+        println!("  Res {}, från {} kl {} till {} kl {}, {} {}",
+            i.destj.duration_as_string(),
+            dest_name, i.destj.deptime, p.dest_sa.name, i.destj.arrtime,
+            i.destj.changes, if i.destj.changes == 1 {"byte"} else {"byten"});
+        sa_skip.insert(i.path.src);
+        sa_skip.insert(i.path.dest);
     }
 }
 
@@ -208,11 +248,16 @@ fn main() {
     let stopareas: HashMap<i32, StopArea> = rustc_serialize::json::decode(&s).unwrap();
     let paths = utils::read_paths();
     let args: Vec<_> = std::env::args().collect();
-    let d = args[1].parse().unwrap();
-    let origin = ask_stop_area(&args[2]).unwrap();
+    let d: i32 = args[1].parse().unwrap();
+    let speed = args[2].parse().unwrap();
+    let origin = ask_stop_area(&args[3]).unwrap();
 
-    let sp = SearchParams { min_distance: d - 50, max_distance: d + 50, opt_distance: d,
-        origin_sa: origin, origin_time: chrono::Local::now().naive_local() };
+    // Round to nearest second
+    let otime = chrono::Local::now().naive_local().timestamp() / 1000;
+    let otime = TimeStamp::from_timestamp(otime * 1000, 0);
+
+    let sp = SearchParams { min_distance: d - 50, max_distance: d + 50, walk_speed: speed,
+        origin_sa: origin.clone(), dest_sa: origin, origin_time: otime };
 
     do_search(&sp, &paths, &stopareas);
 }

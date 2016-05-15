@@ -22,6 +22,13 @@ pub struct Path {
     pub etapp: String, // E g: 5_1;5_2
 }
 
+impl Path {
+    pub fn reverse(&mut self) {
+        std::mem::swap(&mut self.srcdist, &mut self.destdist);
+        std::mem::swap(&mut self.src, &mut self.dest);
+    }
+}
+
 pub fn read_stopareas() -> HashMap<i32, StopArea> {
     let mut f = std::fs::File::open("../data/stopareas.json").unwrap();
     let mut s = String::new();
