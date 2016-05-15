@@ -6,3 +6,6 @@ authors = ["David Henningsson <diwic@ubuntu.com>"]
 [dependencies]
 rustc-serialize = "0.3"
 utils = { path = "../utils" }
+chrono = "0.2"
+xml-rs = "0.2"
+hyper = "0.9"
