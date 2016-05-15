@@ -94,8 +94,8 @@ impl Journey {
 fn ask_journeys(from: &StopArea, to: &StopArea, deptime: TimeStamp) -> Vec<Journey> {
     let mut url = hyper::Url::parse("http://www.labs.skanetrafiken.se/v2.2/resultspage.asp").unwrap();
     url.query_pairs_mut()
-        .append_pair("inpDate", &deptime.format("%Y-%m-%d").to_string())
-        .append_pair("inpTime", &deptime.format("%H:%M:%S").to_string())
+        .append_pair("inpDate", &deptime.format("%y%m%d").to_string())
+        .append_pair("inpTime", &deptime.format("%H%M").to_string())
         .append_pair("cmdAction", "search")
         .append_pair("selPointFr", &format!("{}|{}|0", from.name, from.id))
         .append_pair("selPointTo", &format!("{}|{}|0", to.name, to.id));
@@ -172,6 +172,11 @@ fn fix_etapp(s: &str) -> String {
 
 fn to_km(i: i32) -> f64 { (i as f64)/1000f64 }
 
+fn time_to_str(d: TimeStamp, reftime: TimeStamp) -> String {
+    if d.date() == reftime.date() { d.format("%H:%M").to_string() }
+    else { d.format("%Y-%m-%d %H:%M").to_string() }
+}
+
 struct FullPath {
     origj: Journey,
     destj: Journey,
@@ -236,15 +241,15 @@ fn do_search(p: &SearchParams, paths: &Vec<utils::Path>, stopareas: &HashMap<i32
         println!("");
         println!("Från {} till {}: minst {:.1} km", src_name, dest_name, to_km(i.path.dist));
         println!("  Res {}, från {} kl {} till {} kl {}, {} {}",
-            i.origj.duration_as_string(),
-            p.origin_sa.name, i.origj.deptime, src_name, i.origj.arrtime,
+            i.origj.duration_as_string(), p.origin_sa.name, time_to_str(i.origj.deptime, p.origin_time),
+            src_name, time_to_str(i.origj.arrtime, p.origin_time),
             i.origj.changes, if i.origj.changes == 1 {"byte"} else {"byten"});
         println!("  Gå minst {:.1} km, från {} till Skåneleden", to_km(i.path.srcdist), src_name);
         println!("  Gå {:.1} km, på {}", to_km(i.path.dist - i.path.srcdist - i.path.destdist), fix_etapp(&i.path.etapp));
         println!("  Gå minst {:.1} km, från Skåneleden till {}", to_km(i.path.destdist), dest_name);
         println!("  Res {}, från {} kl {} till {} kl {}, {} {}",
-            i.destj.duration_as_string(),
-            dest_name, i.destj.deptime, p.dest_sa.name, i.destj.arrtime,
+            i.destj.duration_as_string(), dest_name, time_to_str(i.destj.deptime, p.origin_time), 
+            p.dest_sa.name, time_to_str(i.destj.arrtime, p.origin_time),
             i.destj.changes, if i.destj.changes == 1 {"byte"} else {"byten"});
         sa_skip.insert(i.path.src);
         sa_skip.insert(i.path.dest);
@@ -260,15 +265,21 @@ fn main() {
     let stopareas: HashMap<i32, StopArea> = rustc_serialize::json::decode(&s).unwrap();
     let paths = utils::read_paths();
     let args: Vec<_> = std::env::args().collect();
+    if args.len() < 4 {
+        println!("Usage: searchpath distance(m) speed(m/h) origin(stoparea name) starttime(yyyy-mm-ddThh:nn)");
+        return;
+    }
     let d: i32 = args[1].parse().unwrap();
     let speed = args[2].parse().unwrap();
     let origin = ask_stop_area(&args[3]).unwrap();
+    
+    let otime = args.get(4).and_then(|a| { println!("{}", a); Some(TimeStamp::parse_from_str(a, "%Y-%m-%dT%H:%M").unwrap()) })
+        .unwrap_or_else(|| {
+            // Round to nearest second
+            TimeStamp::from_timestamp((chrono::Local::now().naive_local().timestamp() / 1000) * 1000, 0)
+        });
 
-    // Round to nearest second
-    let otime = chrono::Local::now().naive_local().timestamp() / 1000;
-    let otime = TimeStamp::from_timestamp(otime * 1000, 0);
-
-    let sp = SearchParams { min_distance: d - 50, max_distance: d + 50, walk_speed: speed,
+    let sp = SearchParams { min_distance: d - 100, max_distance: d + 100, walk_speed: speed,
         origin_sa: origin.clone(), dest_sa: origin, origin_time: otime };
 
     do_search(&sp, &paths, &stopareas);
